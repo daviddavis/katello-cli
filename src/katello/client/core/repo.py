@@ -3,7 +3,8 @@
 # Copyright 2013 Red Hat, Inc.
 #
 # This software is licensed to you under the GNU General Public License,
-# version 2 (GPLv2). There is NO WARRANTY for this software, express or # implied, including the implied warranties of MERCHANTABILITY or FITNESS
+# version 2 (GPLv2). There is NO WARRANTY for this software, express or
+# implied, including the implied warranties of MERCHANTABILITY or FITNESS
 # FOR A PARTICULAR PURPOSE. You should have received a copy of GPLv2
 # along with this software; if not, see
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
@@ -32,13 +33,14 @@ from katello.client.lib.ui.printer import batch_add_columns
 from katello.client.lib.ui.progress import ProgressBar, run_async_task_with_status, run_spinner_in_bg
 from katello.client.lib.ui.progress import wait_for_async_task
 from katello.client.lib.ui.formatters import format_sync_errors, format_sync_time, format_sync_state
-from katello.client.lib.rpm_utils import generate_rpm_data
-from katello.client.lib.puppet_utils import generate_puppet_data
+from katello.client.lib.rpm_utils import generate_rpm_data, InvalidRPMError
+from katello.client.lib.puppet_utils import generate_puppet_data, ExtractionException
 
 
 ALLOWED_REPO_URL_SCHEMES = ("http", "https", "ftp", "file")
 
 # base action ----------------------------------------------------------------
+
 
 class RepoAction(BaseAction):
 
@@ -498,7 +500,7 @@ class ContentUpload(SingleRepoAction):
         parser.add_option('--content_type', dest='content_type',
                           help=_("type of content to upload (puppet or yum, required)"))
         parser.add_option('--chunk', dest='chunk',
-                          help=_("number of bytes to send to server at a time (default is 500000)"))
+                          help=_("number of bytes to send to server at a time (default is 1048575)"))
 
         opt_parser_add_org(parser, required=1)
         opt_parser_add_environment(parser, default="Library")
@@ -527,17 +529,16 @@ class ContentUpload(SingleRepoAction):
             repo = get_repo(org_name, repo_name, prod_name, prod_label, prod_id, env_name, False)
             repo_id = repo["id"]
 
-        if content_type == "yum":
-            unit_key, metadata = generate_rpm_data(filepath)
-        elif content_type == "puppet":
-            unit_key, metadata = generate_puppet_data(filepath)
-        else:
-            print _("Content type '%s' not valid. Must be puppet or yum.") % content_type
+        unit_key, metadata = self.get_content_data(content_type, filepath)
+
+        if unit_key is None and metadata is None:
             return os.EX_DATAERR
 
         upload_id = self.upload_api.create(repo_id)["upload_id"]
         self.send_content(repo_id, upload_id, filepath, chunk)
-        self.upload_api.import_into_repo(repo_id, upload_id, unit_key, metadata)
+        run_spinner_in_bg(self.upload_api.import_into_repo,
+                          [repo_id, upload_id, unit_key, metadata],
+                          message=_("Uploading file to server, please... "))
         self.upload_api.delete(repo_id, upload_id)
 
         print _("Successfully uploaded file into repository")
@@ -545,7 +546,7 @@ class ContentUpload(SingleRepoAction):
 
     def send_content(self, repo_id, upload_id, filepath, chunk=None):
         if not chunk:
-            chunk = 500000
+            chunk = 1048575  # see SSLRenegBufferSize in apache
 
         with open(filepath, "rb") as f:
             offset = 0
@@ -557,6 +558,24 @@ class ContentUpload(SingleRepoAction):
 
                 self.upload_api.upload_bits(repo_id, upload_id, offset, piece)
                 offset += chunk
+
+    def get_content_data(self, content_type, filepath):
+        unit_key = metadata = None
+        if content_type == "yum":
+            try:
+                unit_key, metadata = generate_rpm_data(filepath)
+            except InvalidRPMError:
+                print _("Invalid rpm '%s'. Please check the file and try again.") % filepath
+        elif content_type == "puppet":
+            try:
+                unit_key, metadata = generate_puppet_data(filepath)
+            except ExtractionException:
+                print _("Invalid puppet module '%s'. Please check the file and try again.") % filepath
+        else:
+            print _("Content type '%s' not valid. Must be puppet or yum.") % content_type
+
+        return unit_key, metadata
+
 
 
 # command --------------------------------------------------------------------
