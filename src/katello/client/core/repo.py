@@ -529,20 +529,40 @@ class ContentUpload(SingleRepoAction):
             repo = get_repo(org_name, repo_name, prod_name, prod_label, prod_id, env_name, False)
             repo_id = repo["id"]
 
+        paths = []
+        if os.path.isdir(filepath):
+            for dirname, dirnames, filenames in os.walk(filepath):
+                paths = [os.path.join(dirname, filename) for filename in filenames]
+        elif os.path.isfile(filepath):
+            paths = [filepath]
+        else:
+            print _("Invalid path '%s'.") % filepath
+            return os.EX_DATAERR
+
+        for path in paths:
+            try:
+                self.send_file(path, repo_id, content_type, chunk)
+            except FileUploadError:
+                if len(paths) > 1:
+                    print _("Skipping file '%s'.") % path
+
+        return os.EX_OK
+
+    def send_file(self, filepath, repo_id, content_type, chunk):
+        filename = os.path.basename(filepath)
         unit_key, metadata = self.get_content_data(content_type, filepath)
 
         if unit_key is None and metadata is None:
-            return os.EX_DATAERR
+            raise FileUploadError
 
         upload_id = self.upload_api.create(repo_id)["upload_id"]
         self.send_content(repo_id, upload_id, filepath, chunk)
         run_spinner_in_bg(self.upload_api.import_into_repo,
                           [repo_id, upload_id, unit_key, metadata],
-                          message=_("Uploading file to server, please... "))
+                          message=_("Uploading '%s' to server, please... ") % filename)
         self.upload_api.delete(repo_id, upload_id)
 
-        print _("Successfully uploaded file into repository")
-        return os.EX_OK
+        print _("Successfully uploaded '%s' into repository") % filename
 
     def send_content(self, repo_id, upload_id, filepath, chunk=None):
         if not chunk:
@@ -565,12 +585,12 @@ class ContentUpload(SingleRepoAction):
             try:
                 unit_key, metadata = generate_rpm_data(filepath)
             except InvalidRPMError:
-                print _("Invalid rpm '%s'. Please check the file and try again.") % filepath
+                print _("Cannot parse metadata.json from puppet module '%s'.") % filepath
         elif content_type == "puppet":
             try:
                 unit_key, metadata = generate_puppet_data(filepath)
             except ExtractionException:
-                print _("Invalid puppet module '%s'. Please check the file and try again.") % filepath
+                print _("Cannot parse the rpm metadata from package '%s'.") % filepath
         else:
             print _("Content type '%s' not valid. Must be puppet or yum.") % content_type
 
@@ -583,3 +603,7 @@ class ContentUpload(SingleRepoAction):
 class Repo(Command):
 
     description = _('repo specific actions in the katello server')
+
+
+class FileUploadError(Exception):
+    pass
